@@ -23,51 +23,43 @@ def _categories_dir() -> Path:
 
 DEFAULT_CATEGORIES = [
     Category(
-        name="Leadership & Management",
-        description="Quality and track record of executive leadership",
+        name="Low Cost Producer",
+        description="The company wins because it produces at the lowest cost",
         questions=[
-            Question("Does the CEO have a strong track record of delivering results?"),
-            Question("Is there evidence of strategic vision and long-term planning?"),
-            Question("Are there signs of effective cost management and operational efficiency?"),
+            Question("How did you become a low cost producer?"),
+            Question("Can you commit to volumes?"),
+            Question("Can a competitor beat you on volumes?"),
         ],
     ),
     Category(
-        name="Market Position",
-        description="Competitive advantage and market share",
+        name="Brand Marketing",
+        description="The company wins because of its brand image and marketing",
         questions=[
-            Question("Does the company have a defensible competitive moat?"),
-            Question("Is the company gaining or losing market share?"),
-            Question("How strong is brand recognition and customer loyalty?"),
+            Question("How did you create this image?"),
+            Question("How will you protect that image?"),
         ],
     ),
     Category(
-        name="Financial Health",
-        description="Revenue growth, profitability, and balance sheet strength",
+        name="Becoming the Middle Man",
+        description="The company wins by being an essential intermediary",
         questions=[
-            Question("Is revenue growing consistently year over year?"),
-            Question("Are profit margins expanding or stable?"),
-            Question("Is the debt-to-equity ratio manageable?"),
+            Question("Do you have the expertise?"),
+            Question("Do you have the cash?"),
         ],
     ),
     Category(
-        name="Innovation & Adaptability",
-        description="R&D investment and ability to pivot",
+        name="New Technology",
+        description="The company wins through technological innovation",
         questions=[
-            Question("Is the company investing meaningfully in R&D or new products?"),
-            Question("Can the company adapt quickly to market shifts?"),
-            Question("Is there evidence of successful product launches or pivots?"),
-        ],
-    ),
-    Category(
-        name="Industry Tailwinds",
-        description="External factors and macro trends supporting growth",
-        questions=[
-            Question("Is the industry experiencing secular growth?"),
-            Question("Are regulatory changes favorable or unfavorable?"),
-            Question("Is there rising demand for the company's products/services?"),
+            Question("Does it work?"),
+            Question("Does the market care?"),
+            Question("Can you protect it?"),
         ],
     ),
 ]
+
+# The root question that determines which category applies
+ROOT_QUESTION = "Why do customers buy from this company?"
 
 
 class CategoryStore:
@@ -147,6 +139,27 @@ class CategoryStore:
         if not cat:
             cat = Category(name=src.stem.replace("_", " ").title())
         return cat
+
+    def get_category_raw(self, name: str) -> str:
+        """Get the raw .md content of a category for editing."""
+        for f in sorted(self._dir.glob("*.md")):
+            cat = self._parse_category_file(f)
+            if cat and cat.name == name:
+                return f.read_text(encoding="utf-8")
+        return ""
+
+    def save_category_raw(self, name: str, content: str) -> bool:
+        """Save raw .md content for a category, re-parsing it."""
+        for f in sorted(self._dir.glob("*.md")):
+            cat = self._parse_category_file(f)
+            if cat and cat.name == name:
+                f.write_text(content, encoding="utf-8")
+                return True
+        # New file
+        filename = name.lower().replace(" ", "_").replace("&", "and") + ".md"
+        path = self._dir / filename
+        path.write_text(content, encoding="utf-8")
+        return True
 
     def _parse_category_file(self, path: Path) -> Category:
         """Parse a category .md file with optional YAML frontmatter."""

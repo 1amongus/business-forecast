@@ -104,6 +104,17 @@ class MainController(QObject):
         self._category_store.remove_category(name)
         self._refresh_categories()
 
+    @Slot(str, result=str)
+    def getCategoryContent(self, name: str) -> str:
+        """Get raw .md content for in-app editing."""
+        return self._category_store.get_category_raw(name)
+
+    @Slot(str, str)
+    def saveCategoryContent(self, name: str, content: str):
+        """Save edited .md content and refresh."""
+        self._category_store.save_category_raw(name, content)
+        self._refresh_categories()
+
     @Slot()
     def resetCategories(self):
         """Reset to default categories."""
@@ -189,7 +200,8 @@ class MainController(QObject):
         raw = self._category_store.load_categories()
         self._categories = [
             {"name": c.name, "description": c.description,
-             "questionCount": c.question_count, "weight": c.weight}
+             "questionCount": c.question_count, "weight": c.weight,
+             "questions": [q.text for q in c.questions]}
             for c in raw
         ]
         self.categoriesChanged.emit()
