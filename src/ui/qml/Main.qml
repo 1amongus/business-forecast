@@ -42,6 +42,7 @@ ApplicationWindow {
 
                 Repeater {
                     model: [
+                        {icon: "📥", label: "Ingest"},
                         {icon: "📰", label: "Articles"},
                         {icon: "📋", label: "Categories"},
                         {icon: "🔍", label: "Evaluate"},
@@ -75,6 +76,7 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
 
+            IngestionPage {}
             ArticlesPage {}
             CategoriesPage {}
             EvaluatePage {}
