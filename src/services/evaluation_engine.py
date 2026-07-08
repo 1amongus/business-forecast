@@ -17,10 +17,25 @@ def _evaluations_dir() -> Path:
     return path
 
 
+def _load_guide() -> str:
+    """Load the category classification guide for the SLM."""
+    guide_path = Path(__file__).parent.parent.parent / "guides" / "category_classification.md"
+    if guide_path.exists():
+        return guide_path.read_text(encoding="utf-8")
+    return ""
+
+
+ROOT_QUESTION = "Why do customers buy from this company?"
+
+
 class EvaluationEngine(QObject):
     evaluationComplete = Signal(object)  # Evaluation
     evaluationError = Signal(str)
     progressUpdate = Signal(int, int)  # current, total
+    # New: step-by-step feedback signals
+    stepStarted = Signal(str, str)  # step_type, question_text
+    stepCompleted = Signal(str, str, str, float)  # step_type, question, answer, score
+    rootAnswered = Signal(str, str)  # category_name, evidence
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -30,6 +45,10 @@ class EvaluationEngine(QObject):
         self._current_article = None
         self._current_scores = []
         self._current_idx = 0
+        self._determined_category = None
+        self._question_idx = 0
+        self._current_question_scores = []
+        self._current_question_answers = []
 
     @property
     def model(self) -> str:
@@ -48,7 +67,7 @@ class EvaluationEngine(QObject):
         return int(self._settings.value("slm/maxTokens", 512))
 
     def evaluate(self, article: Article, categories: List[Category]):
-        """Start evaluating an article against all categories."""
+        """Start evaluating an article — step by step with visual feedback."""
         if not categories:
             self.evaluationError.emit("No categories defined.")
             return
@@ -57,21 +76,229 @@ class EvaluationEngine(QObject):
         self._pending_categories = list(categories)
         self._current_scores = []
         self._current_idx = 0
-        self.progressUpdate.emit(0, len(categories))
-        self._evaluate_next_category()
+        self._determined_category = None
+        self._question_idx = 0
+        self._current_question_scores = []
+        self._current_question_answers = []
 
-    def _evaluate_next_category(self):
-        if self._current_idx >= len(self._pending_categories):
-            self._finalize_evaluation()
+        total_steps = 1 + sum(len(c.questions) for c in categories)  # root + all questions
+        self.progressUpdate.emit(0, total_steps)
+
+        # Step 1: Ask the root question
+        self.stepStarted.emit("root", ROOT_QUESTION)
+        self._ask_root_question()
+
+    def _ask_root_question(self):
+        """Ask: Why do customers buy from this company? → determine category."""
+        guide = _load_guide()
+        category_names = ", ".join(f'"{c.name}"' for c in self._pending_categories)
+
+        system_prompt = "You are an expert business analyst. Classify companies into categories based on their competitive advantage. Always respond in valid JSON format."
+        if guide:
+            system_prompt += f"\n\nUse this classification guide:\n\n{guide}"
+
+        prompt = f"""Read this article about "{self._current_article.company}" and answer the question:
+
+"{ROOT_QUESTION}"
+
+Based on the answer, determine which of these categories best describes why customers buy:
+{category_names}
+
+Article:
+---
+{self._current_article.content[:3000]}
+---
+
+Respond in JSON:
+{{
+  "answer": "<1-2 sentence answer to why customers buy>",
+  "category": "<best matching category name from the list>",
+  "evidence": "<direct quote or paraphrase from the article that supports your answer>"
+}}"""
+
+        self._send_request(prompt, self._handle_root_response, system_override=system_prompt)
+
+    def _handle_root_response(self, reply: QNetworkReply):
+        if reply.error() != QNetworkReply.NetworkError.NoError:
+            # Fallback: evaluate all categories
+            self.stepCompleted.emit("root", ROOT_QUESTION, f"Error: {reply.errorString()}", 0.0)
+            self._determined_category = None
+            self._start_category_evaluation()
+            reply.deleteLater()
             return
 
-        category = self._pending_categories[self._current_idx]
-        prompt = self._build_prompt(self._current_article, category)
+        try:
+            data = json.loads(reply.readAll().data().decode("utf-8"))
+            content = data.get("message", {}).get("content", "{}")
+            result = json.loads(content)
 
+            answer = result.get("answer", "Unable to determine.")
+            category_name = result.get("category", "")
+            evidence = result.get("evidence", "")
+
+            # Find the matching category
+            matched = None
+            for cat in self._pending_categories:
+                if cat.name.lower() == category_name.lower():
+                    matched = cat
+                    break
+
+            if not matched:
+                # Fuzzy match
+                for cat in self._pending_categories:
+                    if category_name.lower() in cat.name.lower() or cat.name.lower() in category_name.lower():
+                        matched = cat
+                        break
+
+            self._determined_category = matched
+            self.stepCompleted.emit("root", ROOT_QUESTION, answer, 0.0)
+            self.rootAnswered.emit(matched.name if matched else "Unknown", evidence)
+
+        except (json.JSONDecodeError, ValueError, KeyError):
+            self._determined_category = None
+            self.stepCompleted.emit("root", ROOT_QUESTION, "Could not parse response.", 0.0)
+
+        reply.deleteLater()
+        self._start_category_evaluation()
+
+    def _start_category_evaluation(self):
+        """Start evaluating questions for the determined category (or all)."""
+        if self._determined_category:
+            # Evaluate only the determined category's questions in detail
+            self._evaluate_category_questions(self._determined_category)
+        else:
+            # Fallback: evaluate first category
+            if self._pending_categories:
+                self._evaluate_category_questions(self._pending_categories[0])
+            else:
+                self._finalize_evaluation()
+
+    def _evaluate_category_questions(self, category: Category):
+        """Evaluate each question in a category one by one."""
+        self._current_category = category
+        self._question_idx = 0
+        self._current_question_scores = []
+        self._current_question_answers = []
+        self._evaluate_next_question()
+
+    def _evaluate_next_question(self):
+        """Process the next question in the current category."""
+        category = self._current_category
+        if self._question_idx >= len(category.questions):
+            # All questions done for this category
+            self._finalize_category()
+            return
+
+        question = category.questions[self._question_idx]
+        self.stepStarted.emit("question", question.text)
+
+        prompt = f"""Analyze this article about "{self._current_article.company}" for the category "{category.name}".
+
+Answer this specific question: "{question.text}"
+
+Article:
+---
+{self._current_article.content[:3000]}
+---
+
+Respond in JSON:
+{{
+  "answer": "<concise 1-2 sentence answer based on the article>",
+  "score": <number 1-5 where 1=Very Poor, 5=Excellent>,
+  "evidence": "<exact quote or close paraphrase from the article that supports your answer>"
+}}"""
+
+        self._send_request(prompt, self._handle_question_response)
+
+    def _handle_question_response(self, reply: QNetworkReply):
+        category = self._current_category
+        question = category.questions[self._question_idx]
+
+        answer = "Error"
+        score = 0.0
+        evidence = ""
+
+        if reply.error() != QNetworkReply.NetworkError.NoError:
+            answer = f"Error: {reply.errorString()}"
+        else:
+            try:
+                data = json.loads(reply.readAll().data().decode("utf-8"))
+                content = data.get("message", {}).get("content", "{}")
+                result = json.loads(content)
+                answer = result.get("answer", "No answer.")
+                score = max(1.0, min(5.0, float(result.get("score", 0))))
+                evidence = result.get("evidence", "")
+            except (json.JSONDecodeError, ValueError, KeyError) as e:
+                answer = f"Parse error: {e}"
+
+        reply.deleteLater()
+
+        self._current_question_scores.append(score)
+        self._current_question_answers.append({
+            "question": question.text,
+            "answer": answer,
+            "score": score,
+            "evidence": evidence,
+        })
+
+        self.stepCompleted.emit("question", question.text, answer, score)
+
+        # Update progress
+        completed_steps = 1 + len(self._current_question_answers)
+        total_steps = 1 + len(category.questions)
+        self.progressUpdate.emit(completed_steps, total_steps)
+
+        self._question_idx += 1
+        self._evaluate_next_question()
+
+    def _finalize_category(self):
+        """Finalize scores for the evaluated category and compute overall."""
+        category = self._current_category
+        valid_scores = [s for s in self._current_question_scores if s > 0]
+        avg_score = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
+
+        reasoning_parts = []
+        for qa in self._current_question_answers:
+            reasoning_parts.append(f"Q: {qa['question']} → {qa['answer']} ({qa['score']}/5)")
+
+        self._current_scores.append(CategoryScore(
+            category_name=category.name,
+            score=round(avg_score, 2),
+            reasoning="\n".join(reasoning_parts),
+            question_scores=self._current_question_scores,
+        ))
+
+        self._finalize_evaluation()
+
+    def _finalize_evaluation(self):
+        valid_scores = [s for s in self._current_scores if s.score > 0]
+        if valid_scores:
+            overall = sum(s.score for s in valid_scores) / len(valid_scores)
+        else:
+            overall = 0.0
+
+        evaluation = Evaluation(
+            article_filename=self._current_article.filename,
+            company=self._current_article.company,
+            overall_score=round(overall, 2),
+            category_scores=self._current_scores,
+            summary=f"Category: {self._determined_category.name if self._determined_category else 'Unknown'}. "
+                    f"Evaluated {len(self._current_question_answers)} questions.",
+            model_used=self.model,
+            evaluated_at=datetime.now(),
+        )
+
+        self._save_evaluation(evaluation)
+        self.evaluationComplete.emit(evaluation)
+        print(f"[EvaluationEngine] {evaluation.company}: {evaluation.overall_score}/5 ({evaluation.score_label})")
+
+    def _send_request(self, prompt: str, handler, system_override: str = None):
+        """Send a request to Ollama."""
+        system_msg = system_override or "You are an expert business analyst. Evaluate companies based on articles. Always respond in valid JSON format."
         payload = json.dumps({
             "model": self.model,
             "messages": [
-                {"role": "system", "content": "You are an expert business analyst. Evaluate companies based on articles and score them precisely. Always respond in valid JSON format."},
+                {"role": "system", "content": system_msg},
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
@@ -84,77 +311,10 @@ class EvaluationEngine(QObject):
 
         request = QNetworkRequest(QUrl(f"{self.base_url}/api/chat"))
         request.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
-        request.setTransferTimeout(120000)  # 2 min timeout
+        request.setTransferTimeout(120000)
 
         reply = self._network.post(request, payload)
-        reply.finished.connect(lambda: self._handle_category_response(reply))
-
-    def _handle_category_response(self, reply: QNetworkReply):
-        category = self._pending_categories[self._current_idx]
-
-        if reply.error() != QNetworkReply.NetworkError.NoError:
-            self._current_scores.append(CategoryScore(
-                category_name=category.name,
-                score=0.0,
-                reasoning=f"Error: {reply.errorString()}",
-            ))
-        else:
-            try:
-                data = json.loads(reply.readAll().data().decode("utf-8"))
-                content = data.get("message", {}).get("content", "{}")
-                result = json.loads(content)
-                score = float(result.get("score", 0))
-                score = max(1.0, min(5.0, score))
-                reasoning = result.get("reasoning", "No reasoning provided.")
-                q_scores = result.get("question_scores", [])
-
-                self._current_scores.append(CategoryScore(
-                    category_name=category.name,
-                    score=score,
-                    reasoning=reasoning,
-                    question_scores=[float(s) for s in q_scores],
-                ))
-            except (json.JSONDecodeError, ValueError, KeyError) as e:
-                self._current_scores.append(CategoryScore(
-                    category_name=category.name,
-                    score=0.0,
-                    reasoning=f"Parse error: {e}",
-                ))
-
-        reply.deleteLater()
-        self._current_idx += 1
-        self.progressUpdate.emit(self._current_idx, len(self._pending_categories))
-        self._evaluate_next_category()
-
-    def _finalize_evaluation(self):
-        valid_scores = [s for s in self._current_scores if s.score > 0]
-        if valid_scores:
-            total_weight = sum(
-                cat.weight for cat, s in zip(self._pending_categories, self._current_scores) if s.score > 0
-            )
-            if total_weight > 0:
-                overall = sum(
-                    s.score * cat.weight
-                    for cat, s in zip(self._pending_categories, self._current_scores) if s.score > 0
-                ) / total_weight
-            else:
-                overall = sum(s.score for s in valid_scores) / len(valid_scores)
-        else:
-            overall = 0.0
-
-        evaluation = Evaluation(
-            article_filename=self._current_article.filename,
-            company=self._current_article.company,
-            overall_score=round(overall, 2),
-            category_scores=self._current_scores,
-            summary=f"Evaluated {len(valid_scores)}/{len(self._current_scores)} categories successfully.",
-            model_used=self.model,
-            evaluated_at=datetime.now(),
-        )
-
-        self._save_evaluation(evaluation)
-        self.evaluationComplete.emit(evaluation)
-        print(f"[EvaluationEngine] {evaluation.company}: {evaluation.overall_score}/5 ({evaluation.score_label})")
+        reply.finished.connect(lambda: handler(reply))
 
     def _save_evaluation(self, evaluation: Evaluation):
         """Save evaluation as .md file."""
@@ -168,6 +328,7 @@ class EvaluationEngine(QObject):
             f"- Article: {evaluation.article_filename}",
             f"- Model: {evaluation.model_used}",
             f"- Date: {evaluation.evaluated_at.strftime('%Y-%m-%d %H:%M')}",
+            f"- Category: {self._determined_category.name if self._determined_category else 'N/A'}",
             "",
             "## Category Scores",
             "",
@@ -208,24 +369,3 @@ class EvaluationEngine(QObject):
             )
         except Exception:
             return None
-
-    def _build_prompt(self, article: Article, category: Category) -> str:
-        questions_text = "\n".join(f"  {i+1}. {q.text}" for i, q in enumerate(category.questions))
-        return f"""Analyze the following article about "{article.company}" and evaluate the company on the category "{category.name}".
-
-Category description: {category.description}
-
-Questions to consider:
-{questions_text}
-
-Article content:
----
-{article.content[:3000]}
----
-
-Respond with a JSON object:
-{{
-  "score": <number 1-5, where 1=Very Poor, 2=Poor, 3=Average, 4=Good, 5=Excellent>,
-  "reasoning": "<2-3 sentence explanation of why you gave this score>",
-  "question_scores": [<score 1-5 for each question>]
-}}"""

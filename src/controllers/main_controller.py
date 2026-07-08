@@ -16,6 +16,11 @@ class MainController(QObject):
     isEvaluatingChanged = Signal()
     errorOccurred = Signal(str)
     evaluationDone = Signal()
+    # Step-by-step evaluation signals
+    evalStepStarted = Signal(str, str)  # step_type, question
+    evalStepCompleted = Signal(str, str, str, float)  # type, question, answer, score
+    evalRootAnswered = Signal(str, str)  # category, evidence
+    evalStepsChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -28,6 +33,7 @@ class MainController(QObject):
         self._evaluations = []
         self._is_evaluating = False
         self._current_evaluation = {}
+        self._eval_steps = []
 
         # Seed defaults
         self._category_store.ensure_defaults()
@@ -36,6 +42,9 @@ class MainController(QObject):
         self._eval_engine.evaluationComplete.connect(self._on_evaluation_complete)
         self._eval_engine.evaluationError.connect(self._on_evaluation_error)
         self._eval_engine.progressUpdate.connect(self._on_progress)
+        self._eval_engine.stepStarted.connect(self._on_step_started)
+        self._eval_engine.stepCompleted.connect(self._on_step_completed)
+        self._eval_engine.rootAnswered.connect(self._on_root_answered)
 
         # Load initial data
         self._refresh_all()
@@ -65,6 +74,11 @@ class MainController(QObject):
         return self._current_evaluation
 
     currentEvaluation = Property("QVariant", _get_current_evaluation, notify=evaluationDone)
+
+    def _get_eval_steps(self) -> list:
+        return self._eval_steps
+
+    evalSteps = Property("QVariant", _get_eval_steps, notify=evalStepsChanged)
 
     # --- Article Slots ---
     @Slot(str)
@@ -141,6 +155,10 @@ class MainController(QObject):
             self.errorOccurred.emit("No categories defined. Add categories first.")
             return
 
+        # Clear previous steps
+        self._eval_steps = []
+        self.evalStepsChanged.emit()
+
         self._is_evaluating = True
         self.isEvaluatingChanged.emit()
         print(f"[Main] Evaluating: {article.title} ({len(categories)} categories)")
@@ -152,6 +170,40 @@ class MainController(QObject):
         self._refresh_evaluations()
 
     # --- Internal ---
+    def _on_step_started(self, step_type: str, question: str):
+        self._eval_steps.append({
+            "type": step_type,
+            "question": question,
+            "status": "thinking",
+            "answer": "",
+            "score": 0.0,
+            "evidence": "",
+            "category": "",
+        })
+        self.evalStepsChanged.emit()
+        self.evalStepStarted.emit(step_type, question)
+
+    def _on_step_completed(self, step_type: str, question: str, answer: str, score: float):
+        # Update the last step with matching question
+        for step in reversed(self._eval_steps):
+            if step["question"] == question and step["status"] == "thinking":
+                step["status"] = "done"
+                step["answer"] = answer
+                step["score"] = score
+                break
+        self.evalStepsChanged.emit()
+        self.evalStepCompleted.emit(step_type, question, answer, score)
+
+    def _on_root_answered(self, category: str, evidence: str):
+        # Update root step with category and evidence
+        for step in self._eval_steps:
+            if step["type"] == "root":
+                step["category"] = category
+                step["evidence"] = evidence
+                break
+        self.evalStepsChanged.emit()
+        self.evalRootAnswered.emit(category, evidence)
+
     def _on_evaluation_complete(self, evaluation):
         self._is_evaluating = False
         self.isEvaluatingChanged.emit()

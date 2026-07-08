@@ -23,8 +23,8 @@ def _categories_dir() -> Path:
 
 DEFAULT_CATEGORIES = [
     Category(
-        name="Low Cost Producer",
-        description="The company wins because it produces at the lowest cost",
+        name="Low-Cost Producer",
+        description="The company wins through operational efficiency and scale, producing at lower cost than competitors",
         questions=[
             Question("How did you become a low cost producer?"),
             Question("Can you commit to volumes?"),
@@ -32,28 +32,48 @@ DEFAULT_CATEGORIES = [
         ],
     ),
     Category(
-        name="Brand Marketing",
-        description="The company wins because of its brand image and marketing",
+        name="Commodity Producer",
+        description="The company sells largely interchangeable products; success depends on cost structure and supply reliability",
         questions=[
-            Question("How did you create this image?"),
-            Question("How will you protect that image?"),
+            Question("Is the product truly interchangeable with competitors?"),
+            Question("What is the capacity utilization?"),
+            Question("Does the company have pricing power in favorable cycles?"),
         ],
     ),
     Category(
-        name="Becoming the Middle Man",
-        description="The company wins by being an essential intermediary",
+        name="Brand Marketing",
+        description="The company wins by creating strong emotional connection and customer perception",
+        questions=[
+            Question("How did you create this image?"),
+            Question("How will you protect that image?"),
+            Question("Do customers pay a premium because of the brand?"),
+        ],
+    ),
+    Category(
+        name="Middlemen / Resellers",
+        description="The company wins by connecting buyers and sellers, aggregating supply, and reducing friction",
         questions=[
             Question("Do you have the expertise?"),
             Question("Do you have the cash?"),
+            Question("Can someone disintermediate you?"),
         ],
     ),
     Category(
         name="New Technology",
-        description="The company wins through technological innovation",
+        description="The company wins through innovation and intellectual property",
         questions=[
             Question("Does it work?"),
             Question("Does the market care?"),
             Question("Can you protect it?"),
+        ],
+    ),
+    Category(
+        name="Highly Differentiated Brand-Marketing",
+        description="The company combines strong branding with demonstrable product superiority that competitors cannot easily replicate",
+        questions=[
+            Question("Is the product advantage objectively measurable?"),
+            Question("Does the brand command premium pricing?"),
+            Question("Can competitors replicate both the brand and the product advantage?"),
         ],
     ),
 ]
@@ -82,7 +102,10 @@ class CategoryStore:
 
     def save_category(self, category: Category) -> None:
         """Save category as .md with YAML frontmatter."""
-        filename = category.name.lower().replace(" ", "_").replace("&", "and") + ".md"
+        import re
+        filename = category.name.lower().replace(" ", "_").replace("&", "and")
+        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)  # sanitize invalid chars
+        filename = re.sub(r'_+', '_', filename).strip('_') + ".md"
         path = self._dir / filename
 
         frontmatter = {
@@ -109,7 +132,10 @@ class CategoryStore:
         path.write_text("\n".join(lines), encoding="utf-8")
 
     def remove_category(self, name: str) -> bool:
-        filename = name.lower().replace(" ", "_").replace("&", "and") + ".md"
+        import re
+        filename = name.lower().replace(" ", "_").replace("&", "and")
+        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+        filename = re.sub(r'_+', '_', filename).strip('_') + ".md"
         path = self._dir / filename
         if path.exists():
             path.unlink()
