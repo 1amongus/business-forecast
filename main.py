@@ -11,6 +11,7 @@ from PySide6.QtQuickControls2 import QQuickStyle
 from src.controllers.main_controller import MainController
 from src.controllers.settings_controller import SettingsController
 from src.controllers.ingestion_controller import IngestionController
+from src.controllers.company_controller import CompanyController
 
 
 def main():
@@ -25,6 +26,7 @@ def main():
     main_controller = MainController()
     settings_controller = SettingsController()
     ingestion_controller = IngestionController(default_folder=r"Q:\WSJ")
+    company_controller = CompanyController(main_controller._article_store)
 
     # QML
     engine = QQmlApplicationEngine()
@@ -32,6 +34,7 @@ def main():
     ctx.setContextProperty("mainController", main_controller)
     ctx.setContextProperty("settingsController", settings_controller)
     ctx.setContextProperty("ingestionController", ingestion_controller)
+    ctx.setContextProperty("companyController", company_controller)
 
     qml_dir = Path(__file__).parent / "src" / "ui" / "qml"
     qml_file = qml_dir / "Main.qml"
